@@ -1,6 +1,3 @@
-Блок 1. Производительность рендеринга и браузерный конвейер
-
-
 Кейс 01. Принудительный сброс геометрии (Layout Thrashing / Forced Reflow)
 
 
@@ -50,6 +47,7 @@ function alignCardHeightsRAF(cardsContainer) {
     });
   });
 }
+Используйте код с осторожностью.
 
 Кейс 02. Блокировка главного потока (Long Tasks) при трансформации массива 100k элементов
 
@@ -98,6 +96,7 @@ async function processAnalyticsInChunks(rawTransactions, filterCriteria) {
   
   return { totalRevenue, totalTax };
 }
+Используйте код с осторожностью.
 
 Вариант Б. Вынос расчетов в Web Worker (Рекомендуемый подход для тяжелой аналитики)
 
@@ -143,6 +142,7 @@ function getAnalyticsAsync(rawTransactions, filterCriteria) {
     };
   });
 }
+Используйте код с осторожностью.
 
 Кейс 03. Сетевой DDoS бэкенда через Promise.all (Неконтролируемая конкурентность)
 
@@ -177,6 +177,7 @@ async function uploadWithLimit(fileList, limit = 4) {
   // Дожидаемся выполнения оставшихся «хвостов» в пуле
   return Promise.all(results);
 }
+Используйте код с осторожностью.
 
 Блок 2. Утечки памяти (Memory Leaks) и сборщик мусора V8
 
@@ -207,6 +208,7 @@ function attachComponentMetadata(domNode, metadata) {
     attachedAt: Date.now(),
   });
 }
+Используйте код с осторожностью.
 
 Кейс 05. Забытый AbortSignal и утечка сетевого сокета
 
@@ -250,6 +252,7 @@ function pollServerStatus(onStatusUpdate) {
     controller.abort(); // Мгновенно обрывает TCP/HTTP-соединение на уровне браузера
   };
 }
+Используйте код с осторожностью.
 
 Кейс 06. Утечка через замыкание на тяжелом контексте (The Accidental Retention)
 
@@ -289,6 +292,7 @@ function setupIconClickHandlerPure(iconId) {
 // Использование:
 // Выделяем id сразу, не передавая огромный payload внутрь генератора замыканий
 const handler = setupIconClickHandlerPure(hugeDataPayload.meta.iconId);
+Используйте код с осторожностью.
 
 Кейс 07. Зомби-слушатель глобальной шины (Event Bus Zombie)
 
@@ -331,6 +335,7 @@ class CartComponent {
     this.eventBus.off("ITEM_ADDED", this.handleItemAddedBound);
   }
 }
+Используйте код с осторожностью.
 
 Паттерн 2. Использование стрелочных функций как свойств класса (Экспериментальный/Современный стандарт)
 
@@ -354,6 +359,7 @@ class CartComponentArrow {
     this.eventBus.off("ITEM_ADDED", this.handleItemAdded);
   }
 }
+Используйте код с осторожностью.
 
 Блок 3. Логические асинхронные аварии и стейт
 
@@ -388,6 +394,7 @@ useEffect(() => {
 
   return () => clearInterval(id);
 }, []); // Зависимости пустые — интервал стабилен и не пересоздается
+Используйте код с осторожностью.
 
 Решение 2. Шаблон с использованием useRef (Mutable Container Pattern)
 
@@ -412,6 +419,7 @@ useEffect(() => {
 
   return () => clearInterval(id);
 }, []);
+Используйте код с осторожностью.
 
 Кейс 09. Silent Failure при проглатывании исключений в асинхронной цепочке
 
@@ -419,6 +427,7 @@ useEffect(() => {
 Архитектурный паттерн Result Tuple (Go/Rust style в JS)
 
 Для искоренения неконсистентного состояния UI при скрытых падениях, функции не должны неявно возвращать undefined. Спроектируем строго типизированный паттерн возврата кортежа [error, data].
+javascript
 // 1. Проектирование безопасной обертки или структуры ответа
 async function processOrderPayment(paymentData) {
   try {
@@ -454,6 +463,7 @@ async function onCheckoutClick() {
   // Гарантированно успешный сценарий
   showSuccessModal(result);
 }
+Используйте код с осторожностью.
 
 Кейс 10. Гонка мутаций общего состояния (Shared State Race Condition)
 
@@ -495,6 +505,7 @@ function getAuthenticatedUser() {
 
   return userPromiseCache;
 }
+Используйте код с осторожностью.
 
 Кейс 11. Неконтролируемая рекурсия асинхронных повторов (Stack Overflow / Infinite Loop)
 
@@ -532,6 +543,7 @@ async function fetchWithRetry(url, options = {}, retriesLeft = 5, delay = 1000) 
     return fetchWithRetry(url, options, retriesLeft - 1, delay * 2);
   }
 }
+Используйте код с осторожностью.
 
 Блок 4. Иммутабельность, Нормализация и Архитектура Структур
 
@@ -571,6 +583,7 @@ function updateStateBalance(oldState, newBalance) {
     }
   };
 }
+Используйте код с осторожностью.
 
 Кейс 13. Каскадное уничтожение кэша мемоизации из-за генерации новых литералов
 
@@ -588,6 +601,7 @@ function updateStateBalance(oldState, newBalance) {
 Отрефакторенный код
 
 Необходимо вынести статичные конфигурации за пределы компонента, а динамические ссылки стабилизировать через хуки useMemo и useCallback.
+javascript
 import React, { useCallback, useMemo } from 'react';
 
 // 1. Статичные стили и опции выносим за пределы компонента. Ссылка будет константной всегда.
@@ -628,6 +642,7 @@ const TableRow = React.memo(({ data, style, options, id, onDelete }) => {
     </div>
   );
 });
+Используйте код с осторожностью.
 
 Кейс 14. Неправильное слияние списков через Spread при пагинации (Duplication Bug)
 
@@ -636,6 +651,7 @@ const TableRow = React.memo(({ data, style, options, id, onDelete }) => {
 
 Простой конкатенацией массивов нельзя гарантировать отсутствие дубликатов, если бэкенд отдает пересекающиеся при пагинации данные. Использование вложенных циклов типа .filter(item => !oldItems.includes(item)) порождает квадратичную сложность \(O(N \times M)\), что критично для производительности списков.
 Реализуем линейный алгоритм \(O(N)\) за счет хэш-таблицы (структуры Set/Map).
+javascript
 let feedState = {
   posts: [],
 };
@@ -653,6 +669,7 @@ function appendNextPage(newPostsFromApi) {
     posts: [...feedState.posts, ...uniqueNewPosts],
   };
 }
+Используйте код с осторожностью.
 
 Кейс 15. Деструктуризация с переопределением дефолтов при null значениях из базы данных
 
