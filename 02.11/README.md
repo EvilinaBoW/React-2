@@ -1,717 +1,610 @@
-Кейс 01. Принудительный сброс геометрии (Layout Thrashing / Forced Reflow)
+# Практическая работа: разбор 20 кейсов по JavaScript, SPA и сборке
 
+Разбор 20 production-багов: причина, объяснение механики и исправленный код.
 
-Физика браузерного конвейера и суть проблемы
+## Содержание
 
-Браузерный конвейер визуализации состоит из следующих последовательных шагов:
-\(\text{JavaScript}\rightarrow \text{Style\ (Recalculate)}\rightarrow \text{Layout\ (Reflow)}\rightarrow \text{Paint}\rightarrow \text{Composite}\)
-В штатном режиме браузер оптимизирует этот процесс с помощью пакетной обработки (Batching). Изменения стилей накапливаются в очереди и применяются за один проход в конце макрозадачи перед следующим кадром (обычно раз в 16.6 мс для 60 fps).
-Когда в цикле чередуются чтение геометрических свойств (например, getBoundingClientRect(), offsetHeight, clientWidth) и запись (style.height), этот механизм полностью ломается:
-1. Вызов card.style.height = "300px" помечает геометрию элемента (и его предков) как «грязную» (invalidated).
-2. На следующей итерации вызов card.getBoundingClientRect() требует от браузера предоставить точные и актуальные пиксельные координаты.
-3. Чтобы вернуть точные данные, браузер не может ждать конца макрозадачи. Он вынужден немедленно заблокировать выполнение JS-потока, выполнить синхронный пересчет стилей и геометрии (Forced Reflow).
-4. На 200 карточках этот цикл холостого сброса и пересчета повторяется 200 раз подряд. Это приводит к экспоненциальному росту вычислений (так как изменение высоты одной карточки может влиять на положение остальных в сетке), просадке FPS до 9 и блокировке интерфейса на сотни миллисекунд.
+- [Блок 1. SPA и роутинг](#блок-1-spa-и-роутинг)
+  - [Кейс 01. Зацикливание истории](#кейс-01-зацикливание-истории-браузера)
+  - [Кейс 02. Утечка памяти из-за resize-слушателя](#кейс-02-утечка-памяти-из-за-resize-слушателя)
+  - [Кейс 03. Hard reload вместо SPA-перехода](#кейс-03-hard-reload-вместо-spa-перехода)
+- [Блок 2. Окружение и бандлинг](#блок-2-окружение-и-бандлинг)
+  - [Кейс 04. Неверная классификация зависимостей](#кейс-04-неверная-классификация-зависимостей)
+  - [Кейс 05. Недетерминизм из-за npm install](#кейс-05-недетерминизм-из-за-npm-install)
+  - [Кейс 06. Node.js-модули в клиентском коде](#кейс-06-nodejs-модули-в-клиентском-коде)
+- [Блок 3. Память, ссылки, мутации](#блок-3-память-ссылки-мутации)
+  - [Кейс 07](#кейс-07-мутация-через-общую-ссылку) · [Кейс 08](#кейс-08-shallow-copy-и-вложенные-структуры) · [Кейс 09](#кейс-09-замыкание-var-в-цикле) · [Кейс 10](#кейс-10-потеря-this)
+- [Блок 4. Методы массивов](#блок-4-методы-массивов)
+  - [Кейс 11](#кейс-11-мутирующий-sort) · [Кейс 12](#кейс-12-foreach-вместо-map) · [Кейс 13](#кейс-13-find-и-falsy-значение-0) · [Кейс 14](#кейс-14-reduce-без-initialvalue)
+- [Блок 5. Деструктуризация, Rest, computed properties](#блок-5-деструктуризация-rest-computed-properties)
+  - [Кейс 15](#кейс-15-динамический-ключ-формы) · [Кейс 16](#кейс-16-деструктуризация-null) · [Кейс 17](#кейс-17-порядок-spread)
+- [Блок 6. Асинхронный JS](#блок-6-асинхронный-js)
+  - [Кейс 18](#кейс-18-проглоченная-ошибка-в-new-promise) · [Кейс 19](#кейс-19-race-condition-в-автокомплите) · [Кейс 20](#кейс-20-fail-fast-в-promiseall)
+- [Итоговая таблица](#итоговая-таблица)
 
-Решение (Read-Write Batching)
+---
 
-Для исправления ситуации необходимо полностью разделить фазу чтения данных (Read) и фазу записи изменений (Write), исключив их пересечение в рамках итераций.
-javascript
-function alignCardHeights(cardsContainer) {
-  const cards = cardsContainer.querySelectorAll(".product-card");
-  
-  // Фаза 1: Чтение (Read Batching) — не вызывает Layout, так как стили не меняются
-  const heights = Array.from(cards).map(card => card.getBoundingClientRect().height);
-  
-  // Фаза 2: Запись (Write Batching) — браузер один раз скопом инвалидирует геометрию
-  cards.forEach((card, index) => {
-    if (heights[index] < 300) {
-      card.style.height = "300px";
-    }
-  });
-}
+## Блок 1. SPA и роутинг
 
-// Альтернативный и еще более плавный вариант для анимаций / динамических систем:
-// Использование requestAnimationFrame для выноса записи в начало следующего кадра
-function alignCardHeightsRAF(cardsContainer) {
-  const cards = cardsContainer.querySelectorAll(".product-card");
-  
-  // Чтение в текущей макрозадаче
-  const heights = Array.from(cards).map(card => card.getBoundingClientRect().height);
-  
-  // Запись планируется строго перед отрисовкой кадра
-  requestAnimationFrame(() => {
-    cards.forEach((card, index) => {
-      if (heights[index] < 300) {
-        card.style.height = "300px";
-      }
-    });
-  });
-}
-Используйте код с осторожностью.
+### Кейс 01. Зацикливание истории браузера
 
-Кейс 02. Блокировка главного потока (Long Tasks) при трансформации массива 100k элементов
+**Причина.** `pushState` добавляет новую запись в стек истории, а `replaceState` заменяет текущую запись, не меняя длину стека.
 
+Что происходит в кейсе:
 
-Механика Event Loop и метрика INP
+1. Пользователь заходит на `/cart`, стек: `[/cart]`.
+2. Код делает `pushState('/login')`, стек: `[/cart, /login]`.
+3. Нажатие «Назад» возвращает на `/cart`, роутер снова видит, что пользователь не авторизован, и снова делает push. Получается петля.
 
-Спецификация браузерного Event Loop подразумевает, что главный поток (Main Thread) является однопоточным. Он поочередно обрабатывает задачи из очереди макрозадач (выполнение JS, события ввода) и задачи рендеринга.
-Любая непрерывная синхронная JS-задача, выполняющаяся дольше 50 мс, классифицируется как Long Task. Пока эта задача (в нашем случае filter -> map -> reduce над 100 000 объектов, занимающая 1.5 секунды) активна, стек вызовов не пуст. Event Loop физически не может забрать из очереди событий нажатия пользователя на чекбоксы, инпуты или скролл. Метрика INP (Interaction to Next Paint) фиксирует огромную задержку между кликом и фактической визуальной реакцией интерфейса.
+**Исправление:**
 
-Архитектурные решения
-
-
-Вариант А. Разбиение на тайм-чанки через scheduler.yield() (или fallback на setTimeout)
-
-Этот подход возвращает управление Event Loop каждые \(N\) миллисекунд, позволяя браузеру обработать накопившийся пользовательский ввод и отрендерить кадр между итерациями расчетов.
-javascript
-// Продуктовое решение с поддержкой современного scheduler.yield() и setTimeout-фолбеком
-const yieldToMain = () => {
-  if (typeof scheduler !== 'undefined' && scheduler.yield) {
-    return scheduler.yield();
+```js
+function checkAuthAndNavigate(isAuthenticated, currentPath) {
+  if (!isAuthenticated && currentPath !== "/login") {
+    window.history.replaceState({}, "", "/login"); // подменяем запись, а не добавляем
+    renderLoginPage();
   }
-  return new Promise(resolve => setTimeout(resolve, 0));
-};
-
-async function processAnalyticsInChunks(rawTransactions, filterCriteria) {
-  let totalRevenue = 0;
-  let totalTax = 0;
-  
-  const CHUNK_SIZE = 5000; // Размер порции данных для обработки за один такт (~10-15мс)
-  
-  for (let i = 0; i < rawTransactions.length; i += CHUNK_SIZE) {
-    const chunk = rawTransactions.slice(i, i + CHUNK_SIZE);
-    
-    // Синхронная обработка маленького куска
-    chunk.forEach(t => {
-      if (t.amount > filterCriteria.min && t.status === "completed") {
-        const tax = t.amount * 0.2;
-        totalRevenue += t.amount;
-        totalTax += tax;
-      }
-    });
-    
-    // Уступаем главный поток браузеру для обработки пользовательского ввода
-    await yieldToMain();
-  }
-  
-  return { totalRevenue, totalTax };
 }
-Используйте код с осторожностью.
+```
 
-Вариант Б. Вынос расчетов в Web Worker (Рекомендуемый подход для тяжелой аналитики)
+Приватный URL больше не остаётся в истории, и «Назад» уходит на предыдущую страницу.
 
-Полностью освобождает главный поток. Вычисления происходят в параллельном потоке ОС.
-javascript
-// 1. Код воркера (analytics.worker.js)
-self.onmessage = function(e) {
-  const { rawTransactions, filterCriteria } = e.data;
-  
-  const result = rawTransactions
-    .filter((t) => t.amount > filterCriteria.min && t.status === "completed")
-    .map((t) => ({
-      tax: t.amount * 0.2,
-      amount: t.amount
-    }))
-    .reduce(
-      (acc, t) => {
-        acc.totalRevenue += t.amount;
-        acc.totalTax += t.tax;
-        return acc;
-      },
-      { totalRevenue: 0, totalTax: 0 }
-    );
-    
-  self.postMessage(result);
-};
+---
 
-// 2. Код интеграции в UI-компоненте
-function getAnalyticsAsync(rawTransactions, filterCriteria) {
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL('./analytics.worker.js', import.meta.url));
-    
-    worker.postMessage({ rawTransactions, filterCriteria });
-    
-    worker.onmessage = function(e) {
-      resolve(e.data);
-      worker.terminate(); // Своевременное уничтожение воркера
-    };
-    
-    worker.onerror = function(err) {
-      reject(err);
-      worker.terminate();
-    };
-  });
-}
-Используйте код с осторожностью.
+### Кейс 02. Утечка памяти из-за resize-слушателя
 
-Кейс 03. Сетевой DDoS бэкенда через Promise.all (Неконтролируемая конкурентность)
+**Причина.** Анонимная стрелочная функция замыкает `header` и регистрируется на `window`, который живёт всё время жизни вкладки. Каждый `mountHeader()` добавляет новый слушатель, и старые никогда не удаляются. Они удерживают в памяти отсоединённые DOM-узлы старых шапок, а при каждом `resize` выполняются все накопленные обработчики.
 
-Примечание: Разбор теории и эталонная реализация Concurrency Pool подробно описаны в самом условии задания (см. разделы 1, 2 и 3 в конце файла). Ниже приведено альтернативное, лаконичное и классическое промышленное решение на основе синхронизации через Promise.race для расширения архитектурного кругозора.
-javascript
-async function uploadWithLimit(fileList, limit = 4) {
-  const results = [];
-  const executing = new Set(); // Хранилище для отслеживания текущих активных промисов
+**Исправление:**
 
-  for (const file of fileList) {
-    const formData = new FormData();
-    formData.append("file", file);
+```js
+function mountHeader() {
+  const header = document.getElementById("header");
 
-    // Создаем обертку над операцией fetch
-    const p = fetch("/api/upload", { method: "POST", body: formData })
-      .then(res => ({ status: 'fulfilled', value: res }))
-      .catch(err => ({ status: 'rejected', reason: err }))
-      .then(res => {
-        executing.delete(p); // По завершении удаляем промис из активных
-        return res;
-      });
-
-    results.push(p);
-    executing.add(p);
-
-    // Если лимит превышен, приостанавливаем цикл до завершения хотя бы одного запроса
-    if (executing.size >= limit) {
-      await Promise.race(executing);
-    }
-  }
-
-  // Дожидаемся выполнения оставшихся «хвостов» в пуле
-  return Promise.all(results);
-}
-Используйте код с осторожностью.
-
-Блок 2. Утечки памяти (Memory Leaks) и сборщик мусора V8
-
-
-Кейс 04. Скрытая утечка памяти через глобальный кэш на объектах (Ключи без слабой связи)
-
-
-Алгоритм Mark-and-Sweep и удержание памяти
-
-Современный движок V8 использует алгоритм трассировки Mark-and-Sweep (Маркируй и Сметай). Сборщик мусора (GC) начинает обход от корней (Global Object, стек вызовов, DOM-дерево). Он рекурсивно помечает (Mark) все объекты, до которых можно добраться по ссылкам. Все непомеченные объекты уничтожаются (Sweep).
-Обычный Map устроен так, что он удерживает сильные ссылки (Strong References) как на свои ключи, так и на значения.
-• Когда вы удаляете карточку из DOM (cardsContainer.removeChild(domNode)), ссылка на нее пропадает из активного DOM-дерева.
-• Однако в глобальной куче (Heap) продолжает существовать живой объект nodeMetadataCache.
-• Внутри него лежит ссылка на domNode в качестве ключа.
-• Из-за этого граф достижимости V8 считает узел domNode живым («достижимым от корня nodeMetadataCache»). Узел переходит в статус Detached HTMLElement и не уничтожается, порождая утечку памяти.
-
-Решение
-
-Для решения этой проблемы стандарт ES6 предлагает структуру данных WeakMap. В WeakMap ссылки на объекты-ключи являются слабыми (Weak References). Если на объект-ключ больше нет сильных ссылок (например, элемент удален из DOM-дерева и не сохранен в глобальных переменных), GC автоматически утилизирует этот объект и удаляет соответствующую запись из WeakMap при следующем цикле сборки.
-javascript
-// Решение: Замена Map на WeakMap
-const nodeMetadataCache = new WeakMap();
-
-function attachComponentMetadata(domNode, metadata) {
-  // Ключом в WeakMap могут быть строго только объекты (DOM-узлы идеально подходят)
-  nodeMetadataCache.set(domNode, {
-    ...metadata,
-    attachedAt: Date.now(),
-  });
-}
-Используйте код с осторожностью.
-
-Кейс 05. Забытый AbortSignal и утечка сетевого сокета
-
-
-Рефакторинг с использованием AbortController
-
-javascript
-function pollServerStatus(onStatusUpdate) {
-  let isAlive = true;
-  // Создаем экземпляр контроллера для управления системным сигналом отмены
-  const controller = new AbortController(); 
-
-  async function loop() {
-    while (isAlive) {
-      try {
-        const res = await fetch("/api/health", { 
-          signal: controller.signal // Связываем сетевой сокет с сигналом
-        });
-        const data = await res.json();
-        onStatusUpdate(data);
-      } catch (err) {
-        // fetch при отмене бросает исключение с кодом "AbortError"
-        if (err.name === 'AbortError') {
-          console.log("Fetch aborted successfully.");
-          break; // Выходим из цикла, если сокет был принудительно закрыт
-        }
-        console.error("Poll error", err);
-      }
-      
-      // Защита: чтобы setTimeout тоже прерывался мгновенно при unsubscribe,
-      // можно обернуть его в отменяемый промис, но для базового HTTP-сокета достаточно:
-      await new Promise((r) => setTimeout(r, 5000));
-    }
-  }
-
-  loop();
-
-  // Функция демонтирования
-  return function unsubscribe() {
-    isAlive = false;
-    controller.abort(); // Мгновенно обрывает TCP/HTTP-соединение на уровне браузера
-  };
-}
-Используйте код с осторожностью.
-
-Кейс 06. Утечка через замыкание на тяжелом контексте (The Accidental Retention)
-
-
-Формирование объектов Context в V8 и Accidental Retention
-
-Когда в JavaScript функция объявляет вложенную функцию (колбэк, обработчик событий) и возвращает её, движок V8 конструирует специальный скрытый объект выделенной памяти — Лексическое окружение (Closure Context).
-Оптимизатор V8 устроен так, что область видимости (Context) формируется одна на всю внешнюю функцию, а не индивидуально под каждую переменную. Если внутренняя функция handleIconClick ссылается хотя бы на одну переменную родительского скоупа (в данном случае на iconId), весь объект Context родительской функции сохраняется в памяти. Так как hugeDataPayload находится в том же лексическом окружении, ссылка на этот огромный JSON (20 МБ) случайно «цементируется» в памяти вместе с обработчиком клика.
-
-Безопасный рефакторинг
-
-Чтобы освободить память, необходимо разорвать сильную ссылку на тяжелый объект до момента возврата функции, либо осуществлять экстракцию данных в чистой функции, не создающей долгоживущих замыканий на весь контекст.
-javascript
-// Вариант 1. Явное зануление ссылки на тяжелый контекст (Nulling references)
-function setupIconClickHandler(hugeDataPayload) {
-  const iconId = hugeDataPayload.meta.iconId;
-
-  const handler = function handleIconClick() {
-    console.log("Clicked icon:", iconId);
+  const onResize = () => {
+    header.className = window.innerWidth < 768 ? "header-mobile" : "header-desktop";
   };
 
-  // Разрываем связь с тяжелым объектом. 
-  // Сам hugeDataPayload теперь готов к сборке мусора, так как на него никто не ссылается.
-  hugeDataPayload = null; 
+  window.addEventListener("resize", onResize);
+  onResize(); // начальное состояние
 
-  return handler;
-}
-
-// Вариант 2. Экстракция до формирования замыкания (Архитектурно более чистый)
-function setupIconClickHandlerPure(iconId) {
-  // Данная функция замыкается строго на примитиве (строка/число iconId)
-  return function handleIconClick() {
-    console.log("Clicked icon:", iconId);
+  return function unmountHeader() {
+    window.removeEventListener("resize", onResize); // ссылка на ту же функцию
   };
 }
 
-// Использование:
-// Выделяем id сразу, не передавая огромный payload внутрь генератора замыканий
-const handler = setupIconClickHandlerPure(hugeDataPayload.meta.iconId);
-Используйте код с осторожностью.
+const unmount = mountHeader();
+// при уходе со страницы:
+unmount();
+```
 
-Кейс 07. Зомби-слушатель глобальной шины (Event Bus Zombie)
+`removeEventListener` работает только с той же ссылкой на функцию, поэтому обработчик вынесен в именованную переменную. В React это `return () => window.removeEventListener(...)` внутри `useEffect`.
 
+---
 
-Почему bind порождает утечки?
+### Кейс 03. Hard reload вместо SPA-перехода
 
-Метод Function.prototype.bind() не модифицирует исходную функцию по месту. Он каждый раз создает и возвращает абсолютно новый экземпляр функции-обертки с жестко привязанным контекстом выполнения this.
-Следствие:
-javascript
-this.handleItemAdded.bind(this) !== this.handleItemAdded.bind(this)
-Используйте код с осторожностью.
-Когда в методе destroy() вызывается .off("ITEM_ADDED", this.handleItemAdded.bind(this)), шина событий eventBus пытается найти в своем внутреннем массиве слушателей переданную ссылку на функцию, чтобы удалить её. Но эта ссылка абсолютно новая и там не регистрировалась. В итоге:
-1. Метод .off() молча завершается без удаления старого слушателя.
-2. Глобальная шина eventBus продолжает удерживать ссылку на анонимную функцию-обертку.
-3. Эта обертка через свой внутренний контекст this намертво удерживает экземпляр CartComponent. Компонент превращается в «зомби»: он визуально удален, но продолжает жить в памяти, обрабатывать события и увеличивать массив this.items.
+**Причина.** По клику на `<a href>` браузер выполняет действие по умолчанию, то есть полную навигацию на `/cart` с запросом нового документа. Отменить его можно только через `event.preventDefault()`. Кроме того, inline-атрибут `onclick="router.navigate(...)"` исполняется в глобальной области видимости. Параметр `router` функции `ProductCard` там не виден, поэтому возникает `ReferenceError`. Обработчик падает до отмены действия, и браузер всё равно перезагружает страницу.
 
-Два правильных паттерна отписки
+**Исправление** (делегирование событий, без inline-JS):
 
-
-Паттерн 1. Сохранение ссылки на привязанный метод в конструкторе (Рекомендуется для классов)
-
-javascript
-class CartComponent {
-  constructor(eventBus) {
-    this.eventBus = eventBus;
-    this.items = [];
-
-    // Создаем ОДИН экземпляр привязанной функции и сохраняем ссылку на него
-    this.handleItemAddedBound = this.handleItemAdded.bind(this);
-    
-    this.eventBus.on("ITEM_ADDED", this.handleItemAddedBound);
-  }
-
-  handleItemAdded(item) {
-    this.items.push(item);
-  }
-
-  destroy() {
-    // Передаем в точности ту же самую ссылку
-    this.eventBus.off("ITEM_ADDED", this.handleItemAddedBound);
-  }
+```js
+function ProductCard({ product }) {
+  return `
+    <div class="card">
+      <h3>${product.title}</h3>
+      <a href="/cart" data-link>В корзину</a>
+    </div>`;
 }
-Используйте код с осторожностью.
 
-Паттерн 2. Использование стрелочных функций как свойств класса (Экспериментальный/Современный стандарт)
-
-javascript
-class CartComponentArrow {
-  constructor(eventBus) {
-    this.eventBus = eventBus;
-    this.items = [];
-    
-    // Стрелочная функция автоматически привязывается к инстансу класса при создании
-    this.eventBus.on("ITEM_ADDED", this.handleItemAdded);
-  }
-
-  // Свойство класса, содержащее стрелочную функцию
-  handleItemAdded = (item) => {
-    this.items.push(item);
-  }
-
-  destroy() {
-    // Ссылка остается неизменной, отписка сработает успешно
-    this.eventBus.off("ITEM_ADDED", this.handleItemAdded);
-  }
-}
-Используйте код с осторожностью.
-
-Блок 3. Логические асинхронные аварии и стейт
-
-
-Кейс 08. Устаревшее замыкание (Stale Closure) в интервалах
-
-
-Механика Stale Closure в React Fiber
-
-Каждый раз, когда React выполняет рендер функционального компонента, он вызывает функцию компонента заново, формируя свой уникальный снимок состояния (State Snapshot) и лексическое окружение для текущего рендера.
-В проблемном коде хук useEffect инициализируется строго один раз при монтировании (из-за пустого массива зависимостей []). Колбэк внутри setInterval захватывает (замыкает) переменную secondsLeft из первого рендера, где она была равна 60.
-На первой итерации интервала вызывается setSecondsLeft(60 - 1). Стейт меняется на 59, React запускает перерендер компонента. Однако старый интервал внутри React Fiber продолжает крутиться и на следующей секунде снова выполняет тот же самый изначальный колбэк, где secondsLeft по-прежнему равен 60. Он опять вызовет setSecondsLeft(60 - 1). Интервал навечно застревает на значении 59.
-
-Решения
-
-
-Решение 1. Функциональное обновление стейта (Functional State Update)
-
-Наиболее лаконичный и правильный способ, не требующий перезапуска таймера.
-javascript
-useEffect(() => {
-  const id = setInterval(() => {
-    // Используем колбэк: React сам передаст текущее актуальное состояние (prev) в аргумент
-    setSecondsLeft((prevSeconds) => {
-      if (prevSeconds <= 1) {
-        clearInterval(id);
-        return 0;
-      }
-      return prevSeconds - 1;
-    });
-  }, 1000);
-
-  return () => clearInterval(id);
-}, []); // Зависимости пустые — интервал стабилен и не пересоздается
-Используйте код с осторожностью.
-
-Решение 2. Шаблон с использованием useRef (Mutable Container Pattern)
-
-Используется, когда внутри интервала нужно читать множество постоянно меняющихся пропсов или стейтов без перезапуска подписки.
-javascript
-const secondsRef = useRef(secondsLeft);
-
-// Синхронизируем мутабельный ref на каждом рендере с актуальным стейтом
-useEffect(() => {
-  secondsRef.current = secondsLeft;
+document.addEventListener("click", (e) => {
+  const link = e.target.closest("a[data-link]");
+  if (!link) return;
+  // даём браузеру открыть ссылку в новой вкладке при Ctrl/Cmd/Shift/средней кнопке
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+  e.preventDefault(); // отменяем hard navigation
+  router.navigate(link.getAttribute("href"));
 });
+```
 
-useEffect(() => {
-  const id = setInterval(() => {
-    if (secondsRef.current <= 0) {
-      clearInterval(id);
+Атрибут `href` сохраняется для SEO, доступности и открытия в новой вкладке.
+
+---
+
+## Блок 2. Окружение и бандлинг
+
+### Кейс 04. Неверная классификация зависимостей
+
+**Ошибка.** `vite` это инструмент сборки, ему место в `devDependencies`. `react` и `react-dom` нужны приложению в рантайме, их место в `dependencies`. То же относится к `date-fns`, который импортируется в код. На CI часто стоит `NODE_ENV=production` или `npm ci --omit=dev`. Тогда `vite` не устанавливается и сборка падает, а при другой конфигурации в образ попадает лишнее.
+
+```json
+{
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "date-fns": "^3.6.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}
+```
+
+> Для Vite-SPA, где всё бандлится в статику, формально сборка пройдёт и с любой раскладкой, пока установлены все пакеты. Раскладку делают по стандарту: рантайм-код в `dependencies`, инструменты сборки и тестов в `devDependencies`. Для библиотек и SSR-серверов это уже критично.
+
+---
+
+### Кейс 05. Недетерминизм из-за `npm install`
+
+**Причина.** Оператор `^3.6.0` разрешает любые версии `>=3.6.0 <4.0.0`. `npm install` может подтянуть более свежие минорные и патч-версии, если они вышли с момента последнего запуска, и даже перезаписать lock-файл. В пятницу ставилась одна версия, в понедельник вышла новая с регрессией или breaking change, и сборка упала без единого коммита.
+
+**Решение:** использовать на сервере `npm ci`.
+
+```bash
+git pull origin main
+npm ci          # ставит строго версии из package-lock.json
+npm run build
+```
+
+`npm ci` удаляет `node_modules`, устанавливает ровно то, что записано в `package-lock.json`, и падает, если lock не совпадает с `package.json`. Lock-файл при этом должен быть закоммичен. Не нужно добавлять `--omit=dev`, если сборка выполняется на том же сервере, ведь `vite` лежит в devDependencies.
+
+---
+
+### Кейс 06. Node.js-модули в клиентском коде
+
+**Фундаментальное различие:**
+
+- **Node.js runtime** имеет доступ к файловой системе, процессам и сети ОС (`fs`, `path`, `child_process`).
+- **Browser sandbox** изолирован. У него нет доступа к локальным файлам, а код `Footer.jsx` исполняется у пользователя, где никакого `package.json` проекта нет. Поэтому Vite подменяет `fs` пустой заглушкой.
+
+Чтение файла нужно делать на этапе сборки (в Node) и встраивать результат в бандл как константу.
+
+```js
+// vite.config.js
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import { readFileSync } from "node:fs";
+
+const pkg = JSON.parse(
+  readFileSync(new URL("./package.json", import.meta.url), "utf-8")
+);
+
+export default defineConfig({
+  plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
+});
+```
+
+```jsx
+// src/components/Footer.jsx
+export function Footer() {
+  return <footer>Версия: {__APP_VERSION__}</footer>;
+}
+```
+
+Нужно использовать `JSON.stringify`, потому что `define` делает текстовую подстановку. Для TypeScript добавляют `declare const __APP_VERSION__: string;`.
+
+---
+
+## Блок 3. Память, ссылки, мутации
+
+### Кейс 07. Мутация через общую ссылку
+
+**Причина.** Объекты лежат в куче (Heap), а переменные и элементы массивов хранят ссылки на них. `filter` создаёт новый массив, но кладёт в него те же ссылки на объекты. Поэтому `user.loginAttempts = 0` изменяет объект, на который смотрит и исходный `usersList`.
+
+**Чистая функция:**
+
+```js
+function resetAttemptsForActiveUsers(usersList) {
+  return usersList
+    .filter((user) => user.isActive)
+    .map((user) => ({ ...user, loginAttempts: 0 })); // новые объекты
+}
+```
+
+Исходный массив и его объекты остаются нетронутыми.
+
+---
+
+### Кейс 08. Shallow copy и вложенные структуры
+
+**Физика.** Spread (`{...obj}`) и `Object.assign` копируют только свойства верхнего уровня. Значения-объекты копируются как ссылки, поэтому `userCopy.security` и `userProfile.security` указывают на один и тот же объект, и `roles` тоже общий.
+
+**Вариант 1: глубокое клонирование.**
+
+```js
+const userCopy = structuredClone(userProfile);
+userCopy.security.roles.push("superadmin"); // оригинал не затронут
+```
+
+`structuredClone` не копирует функции, а для Date, Map и Set работает корректно.
+
+**Вариант 2: иммутабельное обновление пути.**
+
+```js
+const userCopy = {
+  ...userProfile,
+  security: {
+    ...userProfile.security,
+    roles: [...userProfile.security.roles, "superadmin"],
+  },
+};
+```
+
+Копируется каждый уровень вдоль изменяемого пути, остальное переиспользуется. Именно так нужно обновлять состояние в React.
+
+---
+
+### Кейс 09. Замыкание `var` в цикле
+
+**Объяснение.** `var` имеет функциональную область видимости, поэтому на весь цикл существует одна переменная `i`. Все колбэки замыкают одну и ту же переменную, а читают её после окончания цикла, когда `i === 6`. `let` создаёт новую привязку на каждую итерацию.
+
+**Способ 1: `let`.**
+
+```js
+for (let i = 1; i <= pagesCount; i++) {
+  buttons.push(() => console.log(`Переход на страницу: ${i}`));
+}
+```
+
+**Способ 2: фабрика или IIFE, фиксирующие значение в своём лексическом окружении.**
+
+```js
+for (var i = 1; i <= pagesCount; i++) {
+  buttons.push(((page) => () => console.log(`Переход на страницу: ${page}`))(i));
+}
+```
+
+Есть и третий вариант: `Array.from({ length: pagesCount }, (_, k) => () => console.log(k + 1))`.
+
+---
+
+### Кейс 10. Потеря `this`
+
+**Объяснение.** `this` определяется в момент вызова, а не объявления. `addEventListener` получает просто функцию и вызывает её с `this = элемент` (кнопка). У кнопки нет свойства `prefix`, поэтому выводится `undefined`. Вместо `eventName` приходит объект `MouseEvent`.
+
+**Вариант 1: `bind`.**
+
+```js
+btn.addEventListener(
+  "click",
+  analyticsTracker.sendEvent.bind(analyticsTracker, "checkout_click")
+);
+```
+
+**Вариант 2: стрелочная обёртка** (вызов через точку сохраняется).
+
+```js
+btn.addEventListener("click", () => analyticsTracker.sendEvent("checkout_click"));
+```
+
+**Вариант 3: привязка внутри самого объекта.**
+
+```js
+const analyticsTracker = {
+  prefix: "ANALYTICS_EVENT",
+  sendEvent: null,
+};
+analyticsTracker.sendEvent = function (eventName) {
+  console.log(`[${this.prefix}]: ${eventName}`);
+}.bind(analyticsTracker);
+```
+
+То же можно сделать через класс с полем `sendEvent = (name) => {...}`, где `this` захватывается лексически. Тогда метод можно передавать как колбэк без обёрток.
+
+---
+
+## Блок 4. Методы массивов
+
+### Кейс 11. Мутирующий `.sort()`
+
+**Мутируют in-place:** `sort`, `reverse`, `splice`, `push`, `pop`, `shift`, `unshift`, `fill`, `copyWithin`.
+
+**Чистые (возвращают новое):** `map`, `filter`, `slice`, `concat`, `flat`, `flatMap`, `reduce`, `toSorted`, `toReversed`, `toSpliced`, `with`.
+
+```js
+function getTopExpensiveProducts(products) {
+  return [...products].sort((a, b) => b.price - a.price).slice(0, 3);
+  // или: products.toSorted((a, b) => b.price - a.price).slice(0, 3);
+}
+```
+
+В React мутация пропса или состояния нарушает иммутабельность. Это приводит к «спонтанным» перестановкам в других компонентах и к пропущенным ререндерам.
+
+---
+
+### Кейс 12. `forEach` вместо `map`
+
+```js
+const mapIdsToTasks = (ids) => ids.map((id) => ({ taskId: id, isDone: false }));
+```
+
+**Почему в React предпочтителен функциональный стиль:**
+
+- `map` это выражение, оно возвращает новое значение и не требует внешней изменяемой переменной.
+- Нет побочных эффектов и ручной индексации, меньше ошибок.
+- Рендер компонента должен быть чистой функцией от props и state, а `array.map(...)` напрямую возвращает JSX-список.
+- Чистые преобразования легче тестировать и предсказуемее для оптимизаций React (мемоизация, сравнение по ссылке).
+
+---
+
+### Кейс 13. `find` и falsy-значение `0`
+
+**Ловушка.** `find` возвращает сам найденный элемент, а им оказался `0`. Условие `!0` равно `true`, поэтому ветка «не найден» срабатывает, хотя элемент найден. Об отсутствии `find` сигнализирует только `undefined`.
+
+```js
+const exitCodes = [0, 5, 8, 12];
+
+// Вариант 1: проверка на undefined
+const targetCode = exitCodes.find((code) => code === 0);
+if (targetCode === undefined) {
+  console.log("Код 0 не найден в списке!");
+} else {
+  console.log("Код успешно найден:", targetCode);
+}
+
+// Вариант 2: если нужен только факт наличия
+if (exitCodes.some((code) => code === 0)) { /* найден */ }
+// или: exitCodes.includes(0)
+
+// Вариант 3: findIndex
+if (exitCodes.findIndex((c) => c === 0) !== -1) { /* найден */ }
+```
+
+---
+
+### Кейс 14. `reduce` без `initialValue`
+
+**Механика.** Если `initialValue` не передан, аккумулятор берёт первый элемент массива, а итерация начинается со второго. Здесь `acc` это объект `{id: 1, ...}`, и `acc + item.price` превращается в строку `"[object Object]1000"`. На пустом массиве такой вызов вообще бросает `TypeError`.
+
+```js
+const totalCost = cartItems.reduce((acc, item) => acc + item.price, 0); // 3000
+```
+
+---
+
+## Блок 5. Деструктуризация, Rest, computed properties
+
+### Кейс 15. Динамический ключ формы
+
+**Объяснение.** В литерале `{ fieldName: value }` ключ статический, то есть строка `"fieldName"`. Чтобы использовать значение переменной как ключ, нужны вычисляемые имена свойств (Computed Property Names) в квадратных скобках.
+
+```js
+function onFieldChange(fieldName, value) {
+  formState = { ...formState, [fieldName]: value };
+}
+```
+
+---
+
+### Кейс 16. Деструктуризация `null`
+
+**Причина.** Значение по умолчанию подставляется только для `undefined`. Здесь же само `serverData` равно `null`, и деструктурировать `null` нельзя, это `TypeError`. Кроме того, `stats: null` тоже не активирует default.
+
+```js
+function renderUserStats(serverData) {
+  const stats = serverData?.stats ?? { views: 0, likes: 0 };
+  return `Просмотры: ${stats.views}`;
+}
+```
+
+Если нужна именно деструктуризация: `const { stats } = serverData ?? {};`, а после неё `stats ?? defaults`. Оператор `??` срабатывает для `null` и `undefined`, а `||` ещё и для `0` и `""`.
+
+---
+
+### Кейс 17. Порядок spread
+
+**Правило (Key Overriding).** При дублировании ключей побеждает последний (`{...a, x: 1}`: `x: 1` перезаписывает `a.x`). В коде `type: "text"` стоит после `...props`, поэтому затирает внешний `type: "password"`.
+
+```js
+function TextInput({ className, ...props }) {
+  return {
+    type: "text", // дефолт
+    ...props,     // внешние props переопределяют дефолт
+    className: ["form-input", className].filter(Boolean).join(" "), // объединяем
+  };
+}
+
+TextInput({ type: "password", id: "pass", className: "wide" });
+// { type: "password", id: "pass", className: "form-input wide" }
+```
+
+---
+
+## Блок 6. Асинхронный JS
+
+### Кейс 18. «Проглоченная» ошибка в `new Promise`
+
+**Причина.** Конструктор `new Promise` оборачивает в try/catch только синхронное выполнение executor. Колбэк `script.onload` вызывается позже, из очереди событий браузера, с другим стеком вызовов. Исключение в нём уходит в глобальный `window.onerror` и не попадает в `reject`, поэтому промис остаётся в `pending`.
+
+```js
+function loadCustomScript(src) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+
+    script.onload = () => {
+      try {
+        const data = JSON.parse("НЕВАЛИДНЫЙ_JSON");
+        resolve(data);
+      } catch (err) {
+        reject(err); // ошибка парсинга уходит в .catch()
+      }
+    };
+    script.onerror = () => reject(new Error(`Не удалось загрузить скрипт: ${src}`));
+
+    document.head.appendChild(script);
+  });
+}
+```
+
+`script.onerror` обрабатывает вторую причину зависания, сетевой сбой загрузки.
+
+---
+
+### Кейс 19. Race condition в автокомплите
+
+**Природа.** Сетевые ответы возвращаются не в порядке отправки запросов (нет гарантии FIFO). Состояние (`currentSearchResult`) записывается тем ответом, который пришёл последним, а не тем, что соответствует последнему вводу. Результат зависит от задержек сети, то есть от «гонки».
+
+```text
+t=0     Запрос 1 ("rea")    ──(задержка 1200 мс)──────────────► Ответ 1 (t=1200)  ← приходит ПОЗЖЕ и затирает экран
+t=200   Запрос 2 ("react")  ──(задержка 200 мс)──► Ответ 2 (t=400)
+```
+
+**Решение с `AbortController`:**
+
+```js
+function createSearchService() {
+  let activeController = null;
+
+  return async function search(query) {
+    activeController?.abort(); // отменяем устаревший запрос
+    const controller = new AbortController();
+    activeController = controller;
+
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`, {
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      if (err.name === "AbortError") return null; // штатная отмена, не ошибка
+      throw err;
+    } finally {
+      if (activeController === controller) activeController = null;
+    }
+  };
+}
+
+const search = createSearchService();
+
+async function onSearchInput(query) {
+  const results = await search(query);
+  if (results === null) return; // запрос отменён, экран не трогаем
+  renderDropdown(results);
+}
+```
+
+В `finally` сравнение с `controller` нужно, чтобы поздно завершившийся старый запрос не сбросил ссылку на новый.
+
+**React-версия** (cleanup-функция в `useEffect`):
+
+```jsx
+import { useState, useEffect } from "react";
+
+function UserSearchDropdown() {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!query.trim()) {
+      setResults([]);
+      setIsLoading(false);
       return;
     }
-    // Читаем всегда свежее значение из контейнера .current
-    setSecondsLeft(secondsRef.current - 1);
-  }, 1000);
 
-  return () => clearInterval(id);
-}, []);
-Используйте код с осторожностью.
+    const controller = new AbortController();
 
-Кейс 09. Silent Failure при проглатывании исключений в асинхронной цепочке
-
-
-Архитектурный паттерн Result Tuple (Go/Rust style в JS)
-
-Для искоренения неконсистентного состояния UI при скрытых падениях, функции не должны неявно возвращать undefined. Спроектируем строго типизированный паттерн возврата кортежа [error, data].
-javascript
-// 1. Проектирование безопасной обертки или структуры ответа
-async function processOrderPayment(paymentData) {
-  try {
-    const token = await generatePaymentToken(paymentData);
-    const result = await chargeCard(token);
-    // В случае успеха: ошибки нет (null), данные на второй позиции
-    return [null, result]; 
-  } catch (error) {
-    // В случае сбоя: возвращаем объект ошибки, данные — null
-    return [error, null];
-  }
-}
-
-// 2. Вызывающий код в слое пользовательского интерфейса (UI):
-async function onCheckoutClick() {
-  setSpinner(true);
-  clearErrors();
-
-  // Деструктуризация обязывает разработчика увидеть и обработать переменную err
-  const [err, result] = await processOrderPayment(data);
-
-  setSpinner(false);
-
-  if (err) {
-    // Ошибка перехвачена и гарантированно отображается пользователю
-    showNotification({
-      type: "error",
-      message: `Оплата не прошла: ${err.message || "Внутренняя ошибка банка"}`
-    });
-    return; // Прерываем выполнение
-  }
-
-  // Гарантированно успешный сценарий
-  showSuccessModal(result);
-}
-Используйте код с осторожностью.
-
-Кейс 10. Гонка мутаций общего состояния (Shared State Race Condition)
-
-
-Решение через Promise Memoization (In-Flight Request Deduplication)
-
-Антипаттерн while(isFetching) загружает процессор холостыми циклами. Правильное решение — кэшировать сам объект промиса (Promise), пока он находится в состоянии ожидания (Pending). Все одновременные вызовы просто подпишутся на один и тот же сетевой источник.
-javascript
-let userPromiseCache = null;
-let cachedUser = null;
-
-function getAuthenticatedUser() {
-  // Сценарий 1: Данные уже закэшированы и лежат в памяти
-  if (cachedUser) {
-    return Promise.resolve(cachedUser);
-  }
-
-  // Сценарий 2: Запрос уже летит в данный момент (In-Flight)
-  if (userPromiseCache) {
-    // Возвращаем ссылку на ОДИН И ТОТ ЖЕ выполняющийся промис
-    return userPromiseCache; 
-  }
-
-  // Сценарий 3: Первичный вызов. Создаем и сохраняем промис в кэш
-  userPromiseCache = fetch("/api/me")
-    .then((res) => {
-      if (!res.ok) throw new Error("Unauthorized");
-      return res.json();
-    })
-    .then((userData) => {
-      cachedUser = userData; // Сохраняем чистые данные для последующих вызовов
-      return cachedUser;
-    })
-    .finally(() => {
-      // Очищаем кэш промиса ПОСЛЕ завершения запроса, 
-      // чтобы последующие вызовы при необходимости обновляли стейт
-      userPromiseCache = null; 
-    });
-
-  return userPromiseCache;
-}
-Используйте код с осторожностью.
-
-Кейс 11. Неконтролируемая рекурсия асинхронных повторов (Stack Overflow / Infinite Loop)
-
-
-Алгоритм Exponential Backoff + Jitter
-
-Для предотвращения DDoS-эффекта на собственный сервер применим экспоненциальное увеличение паузы ожидания между попытками с добавлением случайного шума (Jitter), чтобы распределить нагрузку во времени.
-javascript
-/**
- * Умный сетевой загрузчик с экспоненциальным откатом и джиттером
- */
-async function fetchWithRetry(url, options = {}, retriesLeft = 5, delay = 1000) {
-  try {
-    const response = await fetch(url, options);
-    if (!response.ok) {
-      throw new Error(`HTTP error! Status: ${response.status}`);
-    }
-    return await response.json();
-  } catch (err) {
-    // Базовый случай: исчерпан лимит попыток — выбрасываем исключение вверх
-    if (retriesLeft <= 0) {
-      throw new Error(`Failed to fetch after multiple retries. Original error: ${err.message}`);
+    async function executeSearch() {
+      setIsLoading(true);
+      try {
+        const res = await fetch(
+          `/api/users?search=${encodeURIComponent(query)}`,
+          { signal: controller.signal }
+        );
+        if (!res.ok) throw new Error("Search failed");
+        setResults(await res.json());
+      } catch (err) {
+        if (err.name !== "AbortError") console.error("Ошибка поиска:", err);
+      } finally {
+        // выключаем индикатор только если запрос не был прерван
+        if (!controller.signal.aborted) setIsLoading(false);
+      }
     }
 
-    // Расчет Jitter (случайный фактор от 0 до 30% от текущей паузы)
-    const jitter = Math.random() * 0.3 * delay;
-    const finalDelay = delay + jitter;
+    executeSearch();
 
-    console.warn(`Fetch failed. Retries left: ${retriesLeft}. Waiting ${Math.round(finalDelay)}ms...`);
-
-    // Засыпаем на расчетное время
-    await new Promise((resolve) => setTimeout(resolve, finalDelay));
-
-    // Рекурсивный вызов: уменьшаем счетчик попыток, удваиваем базовый delay (экспонента)
-    return fetchWithRetry(url, options, retriesLeft - 1, delay * 2);
-  }
-}
-Используйте код с осторожностью.
-
-Блок 4. Иммутабельность, Нормализация и Архитектура Структур
-
-
-Кейс 12. Разрушение ссылочной целостности при использовании JSON.parse(JSON.stringify())
-
-
-Ограничения JSON-сериализации
-
-Спецификация формата JSON жестко ограничена подмножеством типов данных. При использовании JSON.stringify() происходят следующие фатальные искажения:
-• Объекты типов Date автоматически приводятся к строкам ISO (.toISOString()), теряя методы прототипа.
-• Типы RegExp, Map, Set превращаются в пустые объекты {}.
-• Типы Function, Symbol и значения undefined полностью игнорируются и стираются из результирующего объекта.
-• Тип BigInt вызывает критическую ошибку выполнения TypeError, так как JSON не знает, как его сериализовать.
-
-Область применения инструментов глубокого копирования
-
-
-Критерий	JSON.parse(JSON.stringify())	Нативный structuredClone()	Строгий Structural Spread (Redux-style)
-Когда применим	Простые плоские DTO-объекты (только строки, числа, boolean).	Глубокие структуры данных, содержащие Date, RegExp, ArrayBuffer, Map, Set.	Пошаговое точечное обновление стейта в редьюсерах (архитектура Flux/Redux).
-Ограничения	Ломает типы, стирает undefined и функции, падает на BigInt.	Не умеет копировать функции, замыкания, геттеры/сеттеры и DOM-узлы.	Требует ручного описания структуры вложенности на каждом уровне.
-
-
-Пример правильного Structural Spread на уровне редьюсеров
-
-Для сохранения ссылочной целостности неизмененных частей дерева стейта (что крайне важно для мемоизации), стейт нужно обновлять иммутабельно и точечно через поверхностное копирование оператором Spread ...:
-javascript
-// Правильный spread-подход для обновления конкретного поля без разрушения типов стейта
-function updateStateBalance(oldState, newBalance) {
-  return {
-    ...oldState, // Поверхностный клон корня (Date, RegExp, методы не ломаются)
-    balance: newBalance, // Перезапись конкретного поля (BigInt поддерживается)
-    // Если внутри есть вложенный объект, требующий обновления, клонируем его отдельно:
-    meta: {
-      ...oldState.meta,
-      updatedAt: new Date()
-    }
-  };
-}
-Используйте код с осторожностью.
-
-Кейс 13. Каскадное уничтожение кэша мемоизации из-за генерации новых литералов
-
-
-Почему ломается shallowEqual в React.memo?
-
-Компонент React.memo делает поверхностное сравнение пропсов (shallowEqual) перед тем, как принять решение о рендере. Он сравнивает prevProps.style === nextProps.style и prevProps.onDelete === nextProps.onDelete.
-В JavaScript объекты, массивы и функции сравниваются по ссылке (адресу в памяти), а не по содержимому.
-Когда родительский компонент Table перерисовывается:
-1. Строка style={{ padding: "8px" }} создает новый объект с новым адресом в памяти на каждом цикле рендера.
-2. Строка options={{...}} аналогично генерирует новый литерал.
-3. Стрелочная функция onDelete={() => console.log(...)} создается заново с новым идентификатором ссылки.
-В итоге shallowEqual всегда возвращает false, оптимизация React.memo полностью аннулируется, и все 500 строк каскадно рендерятся заново.
-
-Отрефакторенный код
-
-Необходимо вынести статичные конфигурации за пределы компонента, а динамические ссылки стабилизировать через хуки useMemo и useCallback.
-javascript
-import React, { useCallback, useMemo } from 'react';
-
-// 1. Статичные стили и опции выносим за пределы компонента. Ссылка будет константной всегда.
-const CARD_STYLE = { padding: "8px", borderBottom: "1px solid #eee" };
-const DEFAULT_OPTIONS = { canSelect: true, canEdit: false };
-
-function Table({ rows }) {
-  
-  // 2. Стабилизируем колбэк удаления. 
-  // Используем делегирование или извлекаем id внутри дочернего компонента, 
-  // чтобы не завязываться на динамический row.id в замыкании здесь.
-  const handleDelete = useCallback((id) => {
-    console.log("Delete", id);
-  }, []); // Пустой массив зависимостей — ссылка стабильна
+    // Cleanup: срабатывает при каждом новом вводе и при размонтировании
+    return () => controller.abort();
+  }, [query]);
 
   return (
-    <div>
-      {rows.map((row) => (
-        <TableRow
-          key={row.id}
-          data={row}
-          style={CARD_STYLE}
-          options={DEFAULT_OPTIONS}
-          id={row.id}
-          onDelete={handleDelete} // Передаем стабильную ссылку
-        />
-      ))}
+    <div className="search-container">
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Поиск пользователей..."
+      />
+      {isLoading && <span className="spinner">Загрузка...</span>}
+      <ul className="results-list">
+        {results.map((user) => (
+          <li key={user.id}>{user.name}</li>
+        ))}
+      </ul>
     </div>
   );
 }
+```
 
-// Изменение внутри самого TableRow для адаптации под стабильный onDelete:
-const TableRow = React.memo(({ data, style, options, id, onDelete }) => {
-  return (
-    <div style={style}>
-      {/* ... */}
-      <button onClick={() => onDelete(id)}>Удалить</button>
-    </div>
-  );
-});
-Используйте код с осторожностью.
+Дополнительно рекомендуется debounce (200–300 мс), чтобы запрос не уходил на каждый символ.
 
-Кейс 14. Неправильное слияние списков через Spread при пагинации (Duplication Bug)
+---
 
+### Кейс 20. Fail-fast в `Promise.all`
 
-Алгоритм иммутабельного объединения со сложностью \(O(N)\)
+**Поведение.** `Promise.all` отклоняется сразу, как только отклоняется любой из промисов (fail-fast), и остальные результаты теряются. Падение рекламного сервиса поэтому «роняет» и критичные данные.
 
-Простой конкатенацией массивов нельзя гарантировать отсутствие дубликатов, если бэкенд отдает пересекающиеся при пагинации данные. Использование вложенных циклов типа .filter(item => !oldItems.includes(item)) порождает квадратичную сложность \(O(N \times M)\), что критично для производительности списков.
-Реализуем линейный алгоритм \(O(N)\) за счет хэш-таблицы (структуры Set/Map).
-javascript
-let feedState = {
-  posts: [],
-};
+```js
+async function loadFullProfilePage(userId) {
+  const [userRes, balanceRes, promoRes] = await Promise.allSettled([
+    fetchUserData(userId),
+    fetchUserBalance(userId),
+    fetchPromoBanner(),
+  ]);
 
-function appendNextPage(newPostsFromApi) {
-  // 1. Создаем Set из ID уже существующих постов — операция занимает O(N)
-  const existingIds = new Set(feedState.posts.map(post => post.id));
-  
-  // 2. Фильтруем новые посты по Set за O(1) на каждый элемент
-  const uniqueNewPosts = newPostsFromApi.filter(post => !existingIds.has(post.id));
-  
-  // 3. Иммутабельно обновляем стейт без дубликатов ключей
-  feedState = {
-    ...feedState,
-    posts: [...feedState.posts, ...uniqueNewPosts],
-  };
+  // Критичные данные: без них страница не имеет смысла
+  if (userRes.status === "rejected") throw userRes.reason;
+  if (balanceRes.status === "rejected") throw balanceRes.reason;
+
+  // Второстепенный виджет: при сбое просто не показываем
+  const promo = promoRes.status === "fulfilled" ? promoRes.value : null;
+  if (promoRes.status === "rejected") {
+    console.warn("Промо-баннер недоступен:", promoRes.reason);
+  }
+
+  renderProfile({ user: userRes.value, balance: balanceRes.value, promo });
 }
-Используйте код с осторожностью.
+```
 
-Кейс 15. Деструктуризация с переопределением дефолтов при null значениях из базы данных
+`Promise.allSettled` ждёт завершения всех промисов и возвращает массив `{ status, value | reason }`. Решение о том, какие ошибки фатальны, принимается явно в коде. Другой вариант: оставить `Promise.all` и добавить `.catch(() => null)` только к `fetchPromoBanner()`.
 
+---
 
-Спецификация ECMAScript: undefined vs null
+## Итоговая таблица
 
-Согласно спецификации JavaScript, значения по умолчанию (Default Values) в деструктуризации срабатывают исключительно тогда, когда проверяемое свойство имеет значение undefined (или свойство вовсе отсутствует в объекте).
-Значение null в JavaScript трактуется как валидное, явно заданное значение, обозначающее пустоту (абстрактный объект). Оно не заменяется дефолтным параметром деструктуризации. Поэтому выражение { color = "blue" } = { color: null } запишет в переменную color именно значение null, что в итоге при интерполяции строк приведёт к багу в верстке (class="badge null").
-
-Отказоустойчивая функция нормализации (Паттерн Null-To-Undefined)
-
-Для корректной интеграции с реляционными базами данных (где пропущенные значения всегда приходят как null), необходимо написать санитайзер-трансформатор, который заменяет все null на undefined до этапа деструктуризации.
-javascript
-/**
- * Функция очистки и нормализации объекта БД
- */
-function normalizeDbRow(row) {
-  if (row === null || typeof row !== 'object') return {};
-  
-  // Трансформируем все null поля в undefined
-  return Object.keys(row).reduce((acc, key) => {
-    acc[key] = row[key] === null ? undefined : row[key];
-    return acc;
-  }, {});
-}
-
-// Production-ready пайплайн рендеринга
-function renderBadgeConfig(dbRow) {
-  // 1. Пропускаем сырые данные через нормализатор
-  const cleanConfig = normalizeDbRow(dbRow);
-  
-  // 2. Теперь деструктуризация отработает идеально, подставив дефолты вместо undefined
-  const {
-    color = "blue",
-    text = "Новинка",
-    icon = "star",
-  } = cleanConfig;
-
-  return `<span class="badge ${color}">${icon} ${text}</span>`;
-}
-
-// Верификация:
-const dbRow = { color: null, text: null, icon: null };
-console.log(renderBadgeConfig(dbRow)); 
-// Результат: <span class="badge blue">star Новинка</span> (Баг устранен)
+| Кейс | Корень проблемы | Ключевое исправление |
+|---|---|---|
+| 1 | `pushState` засоряет стек | `replaceState` |
+| 2 | слушатель не снимается | `removeEventListener` в unmount |
+| 3 | не отменено действие ссылки | `preventDefault` |
+| 4 | неверные группы зависимостей | runtime в `dependencies`, `vite` в `devDependencies` |
+| 5 | `^` + `npm install` | `npm ci` + lock-файл |
+| 6 | нет `fs` в браузере | `define` в `vite.config.js` |
+| 7–8 | общие ссылки в куче | `map` + spread, `structuredClone` |
+| 9 | одна `var` на весь цикл | `let` / фабрика |
+| 10 | потеря `this` | `bind` / обёртка / поле-стрелка |
+| 11 | мутирующий `sort` | `toSorted` / копия |
+| 12 | императив вместо `map` | `ids.map(...)` |
+| 13 | falsy `0` | `=== undefined` / `some` |
+| 14 | нет `initialValue` | `reduce(..., 0)` |
+| 15 | статический ключ | `[fieldName]` |
+| 16 | default не работает для `null` | `?.` и `??` |
+| 17 | порядок spread | дефолты до `...props` |
+| 18 | ошибка в async-колбэке | `try/catch` + `reject`, `onerror` |
+| 19 | race condition | `AbortController` |
+| 20 | fail-fast | `Promise.allSettled` |
