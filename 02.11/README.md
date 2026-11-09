@@ -583,28 +583,4 @@ async function loadFullProfilePage(userId) {
 
 `Promise.allSettled` ждёт завершения всех промисов и возвращает массив `{ status, value | reason }`. Решение о том, какие ошибки фатальны, принимается явно в коде. Другой вариант: оставить `Promise.all` и добавить `.catch(() => null)` только к `fetchPromoBanner()`.
 
----
 
-## Итоговая таблица
-
-| Кейс | Корень проблемы | Ключевое исправление |
-|---|---|---|
-| 1 | `pushState` засоряет стек | `replaceState` |
-| 2 | слушатель не снимается | `removeEventListener` в unmount |
-| 3 | не отменено действие ссылки | `preventDefault` |
-| 4 | неверные группы зависимостей | runtime в `dependencies`, `vite` в `devDependencies` |
-| 5 | `^` + `npm install` | `npm ci` + lock-файл |
-| 6 | нет `fs` в браузере | `define` в `vite.config.js` |
-| 7–8 | общие ссылки в куче | `map` + spread, `structuredClone` |
-| 9 | одна `var` на весь цикл | `let` / фабрика |
-| 10 | потеря `this` | `bind` / обёртка / поле-стрелка |
-| 11 | мутирующий `sort` | `toSorted` / копия |
-| 12 | императив вместо `map` | `ids.map(...)` |
-| 13 | falsy `0` | `=== undefined` / `some` |
-| 14 | нет `initialValue` | `reduce(..., 0)` |
-| 15 | статический ключ | `[fieldName]` |
-| 16 | default не работает для `null` | `?.` и `??` |
-| 17 | порядок spread | дефолты до `...props` |
-| 18 | ошибка в async-колбэке | `try/catch` + `reject`, `onerror` |
-| 19 | race condition | `AbortController` |
-| 20 | fail-fast | `Promise.allSettled` |
