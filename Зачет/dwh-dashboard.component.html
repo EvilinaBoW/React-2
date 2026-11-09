@@ -1,0 +1,25 @@
+<div style="padding: 20px; fontFamily: sans-serif;">
+  <h2>Аналитическая панель аптечной сети (Angular & DWH)</h2>
+  <p>Анализ спроса и дефектуры (упущенного спроса) по фармацевтическим группам</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Фармацевтическая группа</th>
+        <th>Реализованный спрос (шт.)</th>
+        <th>Кол-во случаев дефектуры (отказов)</th>
+        <th>Упущенная выручка (₽)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr *ngFor="let row of dwhData">
+        <td>{{ row.pharmaGroup }}</td>
+        <td>{{ row.demandQuantity | number }}</td>
+        <td [ NgClass ]="{'high-defecture': row.defectureCount > 40}">
+          {{ row.defectureCount }}
+        </td>
+        <td>{{ row.lostRevenue | currency:'RUB':'symbol':'1.0-0' }}</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
